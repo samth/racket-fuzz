@@ -435,12 +435,26 @@
   (or (fixnum? v) (char? v) (boolean? v) (null? v) (void? v) (eof-object? v)
       (keyword? v) (and (symbol? v) (symbol-interned? v))))
 
+;; An exact number with a large exponent, such as "#e1e99999999", is
+;; correct but takes too long to build and print. So, a literal with an
+;; exponent of more than 4 digits is read as inexact, which is fast, and
+;; skipped if `#e` makes it exact anyway. In radix 16, only `s`, `l` and
+;; `t` mark an exponent.
+(define (large-exponent? s)
+  (regexp-match? (if (regexp-match? #rx"#[xX]" s)
+                     #px"[sSlLtT][+-]?[0-9a-fA-F]{5}"
+                     #px"[sSlLtTdDeEfF][+-]?[0-9]{5}")
+                 s))
+
 ;; A numeric literal must survive number->string and string->number.
 (define-entry (fuzz-number bstr)
   (run-limited
    (lambda ()
      (define s (bytes->string/utf-8 bstr #\?))
-     (define n (string->number s 10 'number-or-false 'decimal-as-exact))
+     (define n (if (large-exponent? s)
+                   (and (not (regexp-match? #rx"#[eE]" s))
+                        (string->number s 10 'number-or-false 'decimal-as-inexact))
+                   (string->number s 10 'number-or-false 'decimal-as-exact)))
      (cond
        [(and n (exact? n))
         (define s2 (number->string n))
