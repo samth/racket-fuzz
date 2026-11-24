@@ -32,6 +32,7 @@
          fuzz-regexp
          fuzz-fasl
          fuzz-heap-eval
+         fuzz-eval-interp
          run-limited
          bug-exn?
          fuzz-debug-port)
@@ -58,6 +59,7 @@
 (define failed-fasl-roundtrip 5)
 (define failed-fasl-raise 6)
 (define failed-heap-check 7)
+(define failed-interp-mismatch 8)
 
 ;; When a port, every exception caught from untrusted code is written
 ;; there; used to check the harness by hand, never while fuzzing.
@@ -393,6 +395,101 @@
            (flush-output bug-port)
            failed-heap-check))]
     [else r]))
+
+;; Compiled and interpreted evaluation must agree. With
+;; `eval-jit-enabled` set to #f, Racket CS compiles code for `eval` in
+;; its "quick" mode, where schemify prepares the code for Racket's own
+;; interpreter instead of Chez Scheme's compiler (in Racket versions
+;; where the parameter has no effect on CS, both runs are compiled).
+;; The program runs once each way, in a fresh namespace, and the
+;; results, exceptions and output must be the same.
+(define-entry (fuzz-eval-interp bstr)
+  (cond
+    [(regexp-match? nondeterministic-rx bstr) 0]
+    [else
+     (define compiled (run-limited (lambda () (eval-transcript bstr #t))))
+     (define interpreted (if (pair? compiled)
+                             (run-limited (lambda () (eval-transcript bstr #f)))
+                             compiled))
+     (cond
+       [(string? compiled) compiled]
+       [(string? interpreted) interpreted]
+       ;; a run that hit a limit has no complete transcript
+       [(not (and (pair? compiled) (pair? interpreted))) 0]
+       [(equal? compiled interpreted) 0]
+       [else
+        (define p (or (fuzz-debug-port) bug-port))
+        (fprintf p "fuzz bug: compiled and interpreted evaluation disagree\n")
+        (fprintf p "compiled:\n ~s\ninterpreted:\n ~s\n" compiled interpreted)
+        (flush-output p)
+        failed-interp-mismatch])]))
+
+;; Programs that use these can see something that differs between two
+;; runs in the same process, such as time, addresses (through `eq?`
+;; hashing), the scheduler, the collector, the continuation's context
+;; or the compilation mode itself.
+(define nondeterministic-rx
+  (byte-regexp
+   (bytes-append
+    #"thread|future|place|sync|evt|sleep|alarm|semaphore|channel|custodian"
+    #"|will|weak|ephemeron|collect|garbage|memory|gc|milliseconds|seconds|time|date"
+    #"|gensym|uninterned|unreadable|eq-hash|hasheq|seteq|eq[?]|memq|assq|remq|hash-code"
+    #"|context|jit|compile|inspector|instrument|errortrace|vm-|unsafe|ffi|break|kill"
+    #"|object-name|struct->vector|procedure|log-|logger|#~|current-")))
+
+;; A list with an entry for each top-level form: its printed results,
+;; or what it raised; then the program's output. Values are compared
+;; by how they print, since a procedure or a mutable value is never
+;; `equal?` to one from the other run.
+(define (eval-transcript bstr jit?)
+  (define-values (out get-output) (make-capture-port output-limit))
+  (define results
+    (parameterize ([eval-jit-enabled jit?]
+                   [current-output-port out]
+                   [current-error-port out]
+                   [print-graph #t])
+      (for/list ([form (in-list (read-forms (open-input-bytes bstr)))])
+        (with-handlers ([(lambda (e) (not (bug-exn? e)))
+                         (lambda (e)
+                           (note-exn e)
+                           (if (exn? e)
+                               (list 'raise (exn-kind e) (exn-first-line e))
+                               (list 'raise (print-bounded e))))])
+          (call-with-values
+           (lambda () (eval (namespace-syntax-introduce form)))
+           (lambda vs (cons 'values (map print-bounded vs))))))))
+  (list results (get-output)))
+
+;; Only the first line of an error message is compared, since the
+;; details can differ: for example, compiled code does not report the
+;; values for a wrong number of results, and scopes that the expander
+;; allocates are numbered from a counter
+(define (exn-first-line e)
+  (car (regexp-match #rx"^[^\n]*" (exn-message e))))
+
+(define (exn-kind e)
+  (vector-ref (struct->vector e) 0))
+
+(define (print-bounded v)
+  (define-values (o get-output) (make-capture-port 4096))
+  (write v o)
+  (get-output))
+
+;; Returns a port that keeps the first `limit` bytes written to it and
+;; drops the rest, and a procedure that returns the kept bytes
+(define (make-capture-port limit)
+  (define kept (open-output-bytes))
+  (define count 0)
+  (values (make-output-port
+           'fuzz-capture
+           always-evt
+           (lambda (bstr start end non-block? breakable?)
+             (define n (min (- end start) (- limit count)))
+             (write-bytes bstr kept start (+ start n))
+             (set! count (+ count n))
+             (- end start))
+           void)
+          (lambda () (get-output-bytes kept))))
 
 ;; Readable data must read back as itself after `write`.
 (define-entry (fuzz-print-roundtrip bstr)

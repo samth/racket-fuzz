@@ -291,7 +291,8 @@ static void check_result(ptr vals)
       "regexp-match and regexp-match-positions disagree",
       "fasl round trip failed",
       "fasl->s-exp raised a value that is not exn:fail",
-      "heap check failed"
+      "heap check failed",
+      "compiled and interpreted evaluation disagree"
     };
     iptr n = Sfixnump(r) ? Sfixnum_value(r) : 0;
     if ((n > 0) && (n < (iptr)(sizeof(properties) / sizeof(properties[0]))))
