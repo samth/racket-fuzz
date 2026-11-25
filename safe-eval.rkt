@@ -337,10 +337,10 @@
 ;; ----------------------------------------
 ;; Reading forms
 
-(define (read-forms in)
+(define (read-forms in [read-one (lambda (in) (read-syntax 'fuzz in))])
   (port-count-lines! in)
   (let loop ([acc '()] [n 0])
-    (define v (read-syntax 'fuzz in))
+    (define v (read-one in))
     (if (or (eof-object? v) (= n max-forms))
         (reverse acc)
         (loop (cons v acc) (add1 n)))))
@@ -495,13 +495,11 @@
 (define-entry (fuzz-print-roundtrip bstr)
   (run-limited
    (lambda ()
-     (for/fold ([r 0]) ([stx (in-list (read-forms (open-input-bytes bstr)))])
-       (define v (syntax->datum stx))
+     ;; `read`, not `read-syntax`, which rejects literal fxvectors,
+     ;; flvectors and mutable prefab structures
+     (for/fold ([r 0]) ([v (in-list (read-forms (open-input-bytes bstr) read))])
        (define s (let ([o (open-output-bytes)]) (write v o) (get-output-bytes o)))
-       ;; `read-syntax`, like the first read, so strings are immutable
-       ;; on both sides (`read` makes mutable strings, which
-       ;; `equal-always?` hash tables compare by identity).
-       (define v2 (syntax->datum (read-syntax 'fuzz (open-input-bytes s))))
+       (define v2 (read (open-input-bytes s)))
        (if (or (equal? v v2) (has-unreadable? v))
            r
            failed-print-roundtrip)))))
