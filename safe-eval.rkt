@@ -405,7 +405,7 @@
 ;; results, exceptions and output must be the same.
 (define-entry (fuzz-eval-interp bstr)
   (cond
-    [(regexp-match? nondeterministic-rx bstr) 0]
+    [(nondeterministic? bstr) 0]
     [else
      (define compiled (run-limited (lambda () (eval-transcript bstr #t))))
      (define interpreted (if (pair? compiled)
@@ -423,6 +423,13 @@
         (fprintf p "compiled:\n ~s\ninterpreted:\n ~s\n" compiled interpreted)
         (flush-output p)
         failed-interp-mismatch])]))
+
+(define (nondeterministic? bstr)
+  (regexp-match? nondeterministic-rx (regexp-replace* deterministic-rx bstr #"")))
+
+;; Names that contain a word below but are deterministic
+(define deterministic-rx
+  #rx#"gcd|exn:fail:out-of-memory|current-continuation-marks")
 
 ;; Programs that use these can see something that differs between two
 ;; runs in the same process, such as time, addresses (through `eq?`
