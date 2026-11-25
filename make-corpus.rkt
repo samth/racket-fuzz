@@ -7,7 +7,8 @@
 ;; <tests-dir> is "pkgs/racket-test-core/tests/racket". Writes
 ;; <out-dir>/{eval,read,number,regexp,fasl}/, one input per file.
 
-(require racket/cmdline
+(require racket/runtime-path
+         racket/cmdline
          racket/file
          racket/list
          racket/path
@@ -203,6 +204,18 @@
         (when (> (length chunk) 1)
           (write-input! "eval" (forms->bytes chunk)))
         (loop (drop vs (max 1 (length chunk))))))))
+
+;; Generated programs, for the eval targets: well-typed programs from
+;; two random program generators, the ones that reached new Chez Scheme
+;; coverage after the tests' own seeds. They use control operators,
+;; continuations, flonum and fixnum operations, structs and mutation,
+;; which the test forms rarely combine; the generators are
+;; github.com/alpaylan/ephyra-racket and racket-ephyra. The file has one
+;; program per page (separated by form feeds).
+(define-runtime-path eval-programs "eval-programs.txt")
+(for ([p (in-list (regexp-split #rx#"\f\n?" (file->bytes eval-programs)))]
+      #:unless (regexp-match? #rx#"^[ \n]*$" p))
+  (write-input! "eval" p))
 
 ;; Values that the tests rarely spell as literals, for the fasl target
 (for ([v (in-list
