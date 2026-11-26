@@ -60,6 +60,7 @@
 (define failed-fasl-raise 6)
 (define failed-heap-check 7)
 (define failed-interp-mismatch 8)
+(define failed-variant-mismatch 9)
 
 ;; When a port, every exception caught from untrusted code is written
 ;; there; used to check the harness by hand, never while fuzzing.
@@ -403,6 +404,10 @@
 ;; where the parameter has no effect on CS, both runs are compiled).
 ;; The program runs once each way, in a fresh namespace, and the
 ;; results, exceptions and output must be the same.
+;;
+;; A third run compiles the program under a variant of the compiler's
+;; settings (see `variants`), chosen from the input, and must agree
+;; with the default compiled run too.
 (define-entry (fuzz-eval-interp bstr)
   (cond
     [(nondeterministic? bstr) 0]
@@ -411,18 +416,78 @@
      (define interpreted (if (pair? compiled)
                              (run-limited (lambda () (eval-transcript bstr #f)))
                              compiled))
+     (define variant (list-ref variants (modulo (for/sum ([b (in-bytes bstr)]) b) (length variants))))
+     (define varied (if (and (pair? compiled) (pair? interpreted))
+                        (run-variant variant (lambda () (eval-transcript bstr #t (car variant))))
+                        compiled))
+     (define (mismatch what a-name a b-name b code)
+       (define p (or (fuzz-debug-port) bug-port))
+       (fprintf p "fuzz bug: ~a\n" what)
+       (fprintf p "~a:\n ~s\n~a:\n ~s\n" a-name a b-name b)
+       (flush-output p)
+       code)
      (cond
        [(string? compiled) compiled]
        [(string? interpreted) interpreted]
+       [(string? varied) varied]
        ;; a run that hit a limit has no complete transcript
        [(not (and (pair? compiled) (pair? interpreted))) 0]
-       [(equal? compiled interpreted) 0]
-       [else
-        (define p (or (fuzz-debug-port) bug-port))
-        (fprintf p "fuzz bug: compiled and interpreted evaluation disagree\n")
-        (fprintf p "compiled:\n ~s\ninterpreted:\n ~s\n" compiled interpreted)
-        (flush-output p)
-        failed-interp-mismatch])]))
+       [(not (equal? compiled interpreted))
+        (mismatch "compiled and interpreted evaluation disagree"
+                  "compiled" compiled "interpreted" interpreted
+                  failed-interp-mismatch)]
+       [(not (pair? varied)) 0]
+       [(not (equal? compiled varied))
+        (mismatch (format "compiled evaluation disagrees with variant ~a" (car variant))
+                  "compiled" compiled (car variant) varied
+                  failed-variant-mismatch)]
+       [else 0])]))
+
+;; Compiler and collector settings that must not change what a program
+;; does. Each is a name and a procedure that applies the settings and
+;; returns a procedure that restores them. `ctx` and `machind` are
+;; applied by `eval-transcript`.
+(define chez-run-cp0 (vm-eval 'run-cp0))
+(define chez-type-recovery (vm-eval 'enable-type-recovery))
+(define chez-score-limit (vm-eval 'cp0-score-limit))
+(define chez-effort-limit (vm-eval 'cp0-effort-limit))
+(define chez-unroll-limit (vm-eval 'cp0-outer-unroll-limit))
+(define chez-collect-trip-bytes (vm-eval 'collect-trip-bytes))
+(define chez-in-place-minimum-generation (vm-eval 'in-place-minimum-generation))
+
+(define (setting param v)
+  (define old (param))
+  (param v)
+  (lambda () (param old)))
+
+(define variants
+  (list
+   ;; Chez Scheme without its source optimizer
+   (cons 'nocp0 (lambda () (setting chez-run-cp0 (lambda (cp0 x) x))))
+   ;; ... without type recovery
+   (cons 'notr (lambda () (setting chez-type-recovery #f)))
+   ;; ... with more inlining and loop unrolling
+   (cons 'cp0big (lambda ()
+                   (define r1 (setting chez-score-limit 120))
+                   (define r2 (setting chez-effort-limit 5000))
+                   (define r3 (setting chez-unroll-limit 2))
+                   (lambda () (r1) (r2) (r3))))
+   ;; frequent collections, which compact in place
+   (cons 'gc (lambda ()
+               (define r1 (setting chez-collect-trip-bytes (* 64 1024)))
+               (define r2 (setting chez-in-place-minimum-generation 0))
+               (lambda () (r1) (r2))))
+   ;; `compile-context-preservation-enabled`, which turns off inlining
+   (cons 'ctx (lambda () void))
+   ;; machine-independent compilation, compiled further by `eval`
+   (cons 'machind (lambda () void))))
+
+(define (run-variant variant thunk)
+  (define restore void)
+  (dynamic-wind
+   (lambda () (set! restore ((cdr variant))))
+   (lambda () (run-limited thunk))
+   (lambda () (restore))))
 
 (define (nondeterministic? bstr)
   (regexp-match? nondeterministic-rx (regexp-replace* deterministic-rx bstr #"")))
@@ -448,10 +513,14 @@
 ;; or what it raised; then the program's output. Values are compared
 ;; by how they print, since a procedure or a mutable value is never
 ;; `equal?` to one from the other run.
-(define (eval-transcript bstr jit?)
+(define (eval-transcript bstr jit? [variant #f])
   (define-values (out get-output) (make-capture-port output-limit))
   (define results
     (parameterize ([eval-jit-enabled jit?]
+                   [compile-context-preservation-enabled (eq? variant 'ctx)]
+                   [current-compile (if (eq? variant 'machind)
+                                        (machine-independent-compile (current-compile))
+                                        (current-compile))]
                    [current-output-port out]
                    [current-error-port out]
                    [print-graph #t])
@@ -466,6 +535,15 @@
            (lambda () (eval (namespace-syntax-introduce form)))
            (lambda vs (cons 'values (map print-bounded vs))))))))
   (list results (get-output)))
+
+;; Compiles to machine-independent form, which `eval` then compiles to
+;; machine code (`compiled-expression-recompile` would also, but it
+;; fails on a top-level form, on a module compiled for immediate
+;; evaluation, and on a module that refers to unexported variables of
+;; another module when the code inspector is weak, as here)
+(define ((machine-independent-compile orig) stx immediate-eval?)
+  (parameterize ([current-compile-target-machine #f])
+    (orig stx immediate-eval?)))
 
 ;; Only the first line of an error message is compared, since the
 ;; details can differ: for example, compiled code does not report the

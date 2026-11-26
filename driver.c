@@ -292,7 +292,8 @@ static void check_result(ptr vals)
       "fasl round trip failed",
       "fasl->s-exp raised a value that is not exn:fail",
       "heap check failed",
-      "compiled and interpreted evaluation disagree"
+      "compiled and interpreted evaluation disagree",
+      "compiled evaluation under a compiler variant disagrees"
     };
     iptr n = Sfixnump(r) ? Sfixnum_value(r) : 0;
     if ((n > 0) && (n < (iptr)(sizeof(properties) / sizeof(properties[0]))))
